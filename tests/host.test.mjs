@@ -7,6 +7,7 @@ import zlib from 'node:zlib'
 import { Readable } from 'node:stream'
 import {
   createHandler,
+  createActivateHandler,
   createIngestHandler,
   createSourceStore,
   decompressZstdFrames,
@@ -440,4 +441,33 @@ test('external sources are opt-in, ingest into the same totals, and deduplicate'
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+test('activate provider saves the first available model', async () => {
+  let saved
+  const ctx = {
+    get(name) {
+      if (name === 'llm') {
+        return {
+          listProviders: () => [{ id: 'demo-gateway', name: 'Demo Gateway' }],
+          listModels: async () => [{ id: 'demo-model' }],
+        }
+      }
+      if (name === 'agentDefaultModel') {
+        return { saveSelection: async (next) => { saved = next } }
+      }
+      return undefined
+    },
+  }
+  const handler = createActivateHandler(ctx)
+  const req = Readable.from([Buffer.from(JSON.stringify({ provider: 'demo-gateway' }))])
+  req.method = 'POST'
+  req.headers = {}
+  req.socket = { remoteAddress: '127.0.0.1' }
+  let body
+  const res = { statusCode: 0, setHeader() {}, end(value) { body = value } }
+  await handler(req, res)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(saved, { provider: 'demo-gateway', model: 'demo-model' })
+  assert.equal(JSON.parse(body).ok, true)
 })

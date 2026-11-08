@@ -37,6 +37,8 @@ export const ROUTE = '/plugins/dsh-usage-statistics/data'
 export const INGEST_ROUTE = '/plugins/dsh-usage-statistics/ingest'
 /** Source inventory route. */
 export const SOURCES_ROUTE = '/plugins/dsh-usage-statistics/sources'
+/** Switch the default model provider from a provider card. */
+export const ACTIVATE_ROUTE = '/plugins/dsh-usage-statistics/activate-provider'
 
 const DEFAULTS = Object.freeze({
   refreshSeconds: 5,
@@ -1090,6 +1092,68 @@ function withBuiltinSource(catalog, scannedSessions) {
 }
 
 /**
+ * Build the provider cards shown above the dashboard. The two balance-backed
+ * providers stay first; every other provider configured in DSH follows them so
+ * a custom gateway can be activated from the same strip. The active provider
+ * always occupies the first slot.
+ */
+async function readProviderCards(ctx, active, balance) {
+  const balanceRows = Array.isArray(balance?.providers) ? balance.providers : []
+  const balanceById = new Map(balanceRows.map((row) => [row.id, row]))
+  const rows = new Map()
+  const llm = ctx.get('llm')
+  if (llm !== undefined && typeof llm.listProviders === 'function') {
+    for (const provider of llm.listProviders()) {
+      if (provider === null || typeof provider !== 'object' || typeof provider.id !== 'string') continue
+      let models = []
+      try {
+        const listed = await llm.listModels(provider.id)
+        if (Array.isArray(listed)) models = listed.map((model) => model?.id).filter((id) => typeof id === 'string')
+      } catch {
+        // A provider whose catalogue is unavailable still deserves a card.
+      }
+      rows.set(provider.id, {
+        id: provider.id,
+        name: typeof provider.name === 'string' && provider.name !== '' ? provider.name : provider.id,
+        models,
+        modelCount: models.length,
+        available: models.length > 0,
+        balance: balanceById.get(provider.id) ?? null,
+        kind: balanceById.has(provider.id) ? 'balance' : 'preset',
+      })
+    }
+  }
+  for (const row of balanceRows) {
+    if (!rows.has(row.id)) {
+      rows.set(row.id, {
+        id: row.id,
+        name: row.id === 'opencode-go' ? 'OpenCode Go' : row.id === 'deepseek-official' ? 'DeepSeek 官方' : row.id,
+        models: [],
+        modelCount: 0,
+        available: row.ok !== false,
+        balance: row,
+        kind: 'balance',
+      })
+    }
+  }
+  const activeId = typeof active?.provider === 'string' ? active.provider : balance?.activeId ?? ''
+  const preferred = ['opencode-go', 'deepseek-official']
+  return [...rows.values()]
+    .map((row) => ({ ...row, active: row.id === activeId }))
+    .sort((left, right) => {
+      if (left.active !== right.active) return left.active ? -1 : 1
+      const leftIndex = preferred.indexOf(left.id)
+      const rightIndex = preferred.indexOf(right.id)
+      if (leftIndex !== -1 || rightIndex !== -1) {
+        if (leftIndex === -1) return 1
+        if (rightIndex === -1) return -1
+        return leftIndex - rightIndex
+      }
+      return left.name.localeCompare(right.name)
+    })
+}
+
+/**
  * Build the request handler.
  * @param {object} ctx - plugin context.
  * @param {object} options - `{ config, fetchImpl, now, scanRoot }`.
@@ -1222,6 +1286,7 @@ export function createHandler(ctx, options = {}) {
         balance = { at: now(), reading }
         balanceCache = balance
       }
+      const providers = await readProviderCards(ctx, active, balance.reading)
       const payload = {
         ok: true,
         version: PLUGIN_VERSION,
@@ -1230,6 +1295,7 @@ export function createHandler(ctx, options = {}) {
         active,
         ...summary,
         sources: sourceCatalog,
+        providers,
         balance: balance.reading,
         scan: {
           sessions: scanned.sessions.length,
@@ -1325,6 +1391,58 @@ export function createSourcesHandler(ctx, options = {}) {
   }
 }
 
+/** Build the provider activation route. */
+export function createActivateHandler(ctx, options = {}) {
+  return async (req, res) => {
+    if (!allow(ctx, req)) {
+      res.statusCode = 401
+      res.end()
+      return
+    }
+    if (req.method !== 'POST') {
+      res.statusCode = 405
+      res.setHeader('allow', 'POST')
+      res.end()
+      return
+    }
+    try {
+      const body = await readJsonBody(req, 64 * 1024)
+      const provider = typeof body?.provider === 'string' ? body.provider.trim() : ''
+      if (provider === '') {
+        sendJson(res, 400, { ok: false, code: 'provider', message: 'provider is required' })
+        return
+      }
+      const llm = ctx.get('llm')
+      const modelService = ctx.get('agentDefaultModel')
+      if (llm === undefined || typeof llm.listProviders !== 'function' || modelService === undefined || typeof modelService.saveSelection !== 'function') {
+        sendJson(res, 503, { ok: false, code: 'unavailable', message: 'provider switching is unavailable' })
+        return
+      }
+      const found = llm.listProviders().some((entry) => entry?.id === provider)
+      if (!found) {
+        sendJson(res, 404, { ok: false, code: 'provider', message: `unknown provider: ${provider}` })
+        return
+      }
+      const listed = await llm.listModels(provider)
+      const models = Array.isArray(listed) ? listed.map((entry) => entry?.id).filter((id) => typeof id === 'string') : []
+      if (models.length === 0) {
+        sendJson(res, 400, { ok: false, code: 'model', message: `provider ${provider} has no available model` })
+        return
+      }
+      const requested = typeof body?.model === 'string' ? body.model.trim() : ''
+      const model = requested !== '' && models.includes(requested) ? requested : models[0]
+      await modelService.saveSelection({ provider, model })
+      sendJson(res, 200, { ok: true, active: { provider, model } })
+    } catch (error) {
+      sendJson(res, 500, {
+        ok: false,
+        code: 'activate',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+}
+
 /**
  * Register the readout route.
  * @param {object} ctx - plugin context carrying `webServer`.
@@ -1337,6 +1455,7 @@ export function apply(ctx, config = {}) {
     const handler = createHandler(ctx, { config, sourceStore })
     const ingest = createIngestHandler(ctx, { config, sourceStore })
     const sources = createSourcesHandler(ctx, { sourceStore })
+    const activate = createActivateHandler(ctx)
     ctx.effect(
       () => ctx.webServer.register({ kind: 'exact', path: ROUTE, handler }),
       'dsh-usage-statistics: usage data route',
@@ -1348,6 +1467,10 @@ export function apply(ctx, config = {}) {
     ctx.effect(
       () => ctx.webServer.register({ kind: 'exact', path: SOURCES_ROUTE, handler: sources }),
       'dsh-usage-statistics: usage sources route',
+    )
+    ctx.effect(
+      () => ctx.webServer.register({ kind: 'exact', path: ACTIVATE_ROUTE, handler: activate }),
+      'dsh-usage-statistics: provider activation route',
     )
     ctx.provide('usageAudit', {
       version: PLUGIN_VERSION,
