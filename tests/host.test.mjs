@@ -4,8 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import zlib from 'node:zlib'
+import { Readable } from 'node:stream'
 import {
   createHandler,
+  createIngestHandler,
+  createSourceStore,
   decompressZstdFrames,
   decompressZstdFramesTolerant,
   parseSessionText,
@@ -350,4 +353,91 @@ test('handler reports missing keys without failing the request', async () => {
   const payload = JSON.parse(body)
   assert.equal(payload.ok, true)
   assert.equal(payload.balance.providers.every((provider) => provider.code === 'no-key'), true)
+})
+
+test('external sources are opt-in, ingest into the same totals, and deduplicate', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-usage-sources-'))
+  try {
+    const store = createSourceStore({ home: root, now: () => NOW })
+    const input = {
+      source: { id: 'cc-guard', label: 'CC-Guard 自动审核', kind: 'plugin' },
+      events: [{
+        time: NOW - HOUR,
+        provider: 'deepseek-official',
+        model: 'deepseek-v4.1-flash',
+        input: 1200,
+        cacheRead: 3000,
+        cacheWrite: 0,
+        output: 300,
+        cost: 0.02,
+        currency: 'CNY',
+        sessionId: 'review-1',
+        title: '命令审核',
+        workspace: 'L:/demo/guard',
+      }],
+    }
+    const first = await store.ingest(input)
+    assert.equal(first.accepted, 1)
+    assert.equal(first.source.id, 'cc-guard')
+    const second = await store.ingest(input)
+    assert.equal(second.accepted, 0)
+    assert.equal(second.duplicates, 1)
+
+    const catalog = await store.catalog()
+    assert.equal(catalog[0].id, 'cc-guard')
+    assert.equal(catalog[0].events, 1)
+
+    const sessions = await store.sessions()
+    const summary = summarizeSessions(sessions, {
+      range: '7d',
+      now: NOW,
+      pricing: {},
+      requestsLimit: 100,
+      sources: ['cc-guard'],
+    })
+    assert.equal(summary.totals.requests, 1)
+    assert.equal(summary.totals.tokens, 4500)
+    assert.equal(summary.totals.costs.CNY, 0.02)
+    assert.equal(summary.facets.sources[0].id, 'cc-guard')
+
+    const ctx = { get: () => undefined }
+    const handler = createHandler(ctx, {
+      config: { refreshSeconds: 0, balanceSeconds: 0 },
+      fetchImpl: async () => { throw new Error('offline') },
+      now: () => NOW,
+      scanRoot: path.join(root, 'sessions'),
+      sourceStore: store,
+    })
+    const read = async (url) => {
+      let body
+      const res = { statusCode: 0, setHeader() {}, end(value) { body = value } }
+      await handler({ method: 'GET', url, socket: { remoteAddress: '127.0.0.1' } }, res)
+      return { status: res.statusCode, payload: JSON.parse(body) }
+    }
+    const guarded = await read('/plugins/dsh-usage-statistics/data?range=7d&sources=cc-guard&force=1')
+    assert.equal(guarded.payload.totals.requests, 1)
+    assert.equal(guarded.payload.sources.some((source) => source.id === 'dsh-session'), true)
+    assert.equal(guarded.payload.sources.some((source) => source.id === 'cc-guard'), true)
+    const defaults = await read('/plugins/dsh-usage-statistics/data?range=7d&force=1')
+    assert.equal(defaults.payload.totals.requests, 0)
+    const none = await read('/plugins/dsh-usage-statistics/data?range=7d&sources=none&force=1')
+    assert.equal(none.payload.totals.requests, 0)
+    assert.equal(none.payload.facets.sources.length, 0)
+
+    const ingest = createIngestHandler(ctx, { sourceStore: store })
+    const req = Readable.from([Buffer.from(JSON.stringify({
+      source: { id: 'cc-guard', label: 'CC-Guard 自动审核', kind: 'plugin' },
+      events: [{ id: 'new-event', time: NOW, provider: 'deepseek-official', model: 'deepseek-v4.1-flash', input: 10, output: 2, sessionId: 'review-2' }],
+    }))])
+    req.method = 'POST'
+    req.headers = {}
+    req.socket = { remoteAddress: '127.0.0.1' }
+    let body
+    const res = { statusCode: 0, setHeader() {}, end(value) { body = value } }
+    await ingest(req, res)
+    assert.equal(res.statusCode, 200)
+    assert.equal(JSON.parse(body).accepted, 1)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })

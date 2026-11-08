@@ -1,7 +1,7 @@
 {
   "name": "dsh-usage-compass",
-  "version": "0.3.0",
-  "description": "用量罗盘：DSH 设置页的 API 用量、余额与趋势预测插件，支持 OpenCode Go 和 DeepSeek 官方。",
+  "version": "0.4.0",
+  "description": "用量罗盘：DSH 设置页的 API 用量、余额与趋势预测插件，支持 OpenCode Go、DeepSeek 官方和自定义插件用量推送。",
   "type": "module",
   "main": "src/index.js",
   "exports": {

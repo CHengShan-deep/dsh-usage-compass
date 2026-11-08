@@ -19,6 +19,8 @@ import zlib from 'node:zlib'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { opencodeGoCost, deepseekOfficialCost } from './pricing.js'
+import { createSourceStore, BUILTIN_SOURCE_ID, BUILTIN_SOURCE_LABEL } from './sources.js'
+export { createSourceStore } from './sources.js'
 
 const require = createRequire(import.meta.url)
 const PLUGIN_VERSION = require('../package.json').version
@@ -31,12 +33,17 @@ export const inject = ['webServer']
 
 /** Browser-facing route. */
 export const ROUTE = '/plugins/dsh-usage-statistics/data'
+/** Local ingestion route for other plugins, MCP bridges and helper scripts. */
+export const INGEST_ROUTE = '/plugins/dsh-usage-statistics/ingest'
+/** Source inventory route. */
+export const SOURCES_ROUTE = '/plugins/dsh-usage-statistics/sources'
 
 const DEFAULTS = Object.freeze({
   refreshSeconds: 5,
   balanceSeconds: 30,
   requestsLimit: 5000,
   pricing: {},
+  ingestToken: '',
 })
 
 const DEEPSEEK_BALANCE_URL = 'https://api.deepseek.com/user/balance'
@@ -580,12 +587,18 @@ export function summarizeSessions(sessions, options = {}) {
     session: typeof options.filters?.session === 'string' ? options.filters.session : '',
   }
   const sortMode = options.sort === 'tokens' ? 'tokens' : 'active'
+  const allowedSources = new Set(
+    Array.isArray(options.sources)
+      ? options.sources
+      : [BUILTIN_SOURCE_ID],
+  )
   const workspaceName = (cwd) => path.basename(cwd) || cwd || '未知工作区'
 
   const facetWorkspaces = new Map()
   const facetProviders = new Map()
   const facetModels = new Map()
   const facetSessions = new Map()
+  const facetSources = new Map()
   const selected = []
   const tokenCount = (request) => request.input + request.cacheRead + request.cacheWrite + request.output
   const touchFacet = (map, key, init, request) => {
@@ -600,14 +613,21 @@ export function summarizeSessions(sessions, options = {}) {
   }
 
   for (const session of sessions) {
+    const source = typeof session.source === 'string' && session.source !== '' ? session.source : BUILTIN_SOURCE_ID
+    if (!allowedSources.has(source)) continue
+    const sourceLabel = session.sourceLabel || (source === BUILTIN_SOURCE_ID ? BUILTIN_SOURCE_LABEL : source)
     const requests = []
     const workspaceKey = session.cwd || ''
     for (const request of session.requests) {
       if (request.time < start || request.time > end) continue
-      const priced = estimateCost(pricing, request.provider, request)
+      const priced = Number.isFinite(request.cost)
+        ? { amount: request.cost, currency: request.currency || 'USD' }
+        : estimateCost(pricing, request.provider, request)
       const isGo = typeof request.provider === 'string' && request.provider.includes('opencode')
       const enriched = {
         ...request,
+        source,
+        sourceLabel,
         sessionId: session.id,
         sessionTitle: session.title,
         cwd: session.cwd,
@@ -619,6 +639,7 @@ export function summarizeSessions(sessions, options = {}) {
       touchFacet(facetProviders, request.provider, { id: request.provider }, enriched)
       touchFacet(facetModels, `${request.provider}\u0000${request.model}`, { provider: request.provider, model: request.model }, enriched)
       touchFacet(facetSessions, session.id, { id: session.id, title: session.title || '未命名会话', workspace: workspaceName(workspaceKey) }, enriched)
+      touchFacet(facetSources, source, { id: source, label: sourceLabel }, enriched)
       if (filters.workspace !== '' && workspaceKey !== filters.workspace) continue
       if (filters.session !== '' && session.id !== filters.session) continue
       if (filters.provider !== '' && request.provider !== filters.provider) continue
@@ -638,6 +659,7 @@ export function summarizeSessions(sessions, options = {}) {
     right.tokens - left.tokens || right.requests - left.requests || (right.lastAt ?? 0) - (left.lastAt ?? 0)
   const order = sortMode === 'tokens' ? byTokens : byActive
   const facets = {
+    sources: [...facetSources.values()].sort(byActive),
     workspaces: [...facetWorkspaces.values()].sort(byActive),
     providers: [...facetProviders.values()].sort(byActive),
     models: [...facetModels.values()].sort(byActive),
@@ -735,6 +757,8 @@ export function summarizeSessions(sessions, options = {}) {
     const last = requests.reduce((max, request) => Math.max(max, request.time), 0)
     sessionRows.push({
       id: session.id,
+      source: session.source || BUILTIN_SOURCE_ID,
+      sourceLabel: session.sourceLabel || BUILTIN_SOURCE_LABEL,
       title: session.title || '未命名会话',
       cwd: session.cwd,
       workspace: workspaceName(session.cwd),
@@ -771,6 +795,8 @@ export function summarizeSessions(sessions, options = {}) {
   const limit = Number.isFinite(options.requestsLimit) ? Math.max(1, options.requestsLimit) : 2000
   const requests = allRequests.slice(0, limit).map((request) => ({
     time: request.time,
+    source: request.source,
+    sourceLabel: request.sourceLabel,
     sessionId: request.sessionId,
     sessionTitle: request.sessionTitle,
     provider: request.provider,
@@ -1017,6 +1043,52 @@ function allow(ctx, req) {
   return address === undefined || address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+/** Read one bounded JSON request body. */
+async function readJsonBody(req, limit = 1_000_000) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > limit) {
+      const error = new Error(`request body exceeds ${limit} bytes`)
+      error.code = 'body'
+      throw error
+    }
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    const error = new Error('request body must be valid JSON')
+    error.code = 'body'
+    throw error
+  }
+}
+
+/** Parse the `sources` query. Missing means the built-in DSH source only. */
+function parseSources(value) {
+  if (typeof value !== 'string' || value.trim() === '') return [BUILTIN_SOURCE_ID]
+  if (value.trim() === 'none') return []
+  const ids = value.split(',').map((id) => id.trim()).filter((id) => /^[a-z0-9][a-z0-9._-]{0,63}$/.test(id))
+  return [...new Set(ids)]
+}
+
+/** Source catalog with the built-in DSH source first. */
+function withBuiltinSource(catalog, scannedSessions) {
+  return [
+    {
+      id: BUILTIN_SOURCE_ID,
+      label: BUILTIN_SOURCE_LABEL,
+      kind: 'builtin',
+      builtin: true,
+      events: scannedSessions,
+      lastAt: null,
+    },
+    ...catalog,
+  ]
+}
+
 /**
  * Build the request handler.
  * @param {object} ctx - plugin context.
@@ -1027,6 +1099,8 @@ export function createHandler(ctx, options = {}) {
   const config = { ...DEFAULTS, ...(options.config ?? {}) }
   const fetchImpl = options.fetchImpl ?? fetch
   const scanRoot = options.scanRoot ?? path.join(resolveDshHome(), 'sessions')
+  const sourceHome = options.home ?? path.dirname(path.resolve(scanRoot))
+  const sourceStore = options.sourceStore ?? createSourceStore({ home: sourceHome, now: options.now })
   const now = options.now ?? (() => Date.now())
   const fileCache = new Map()
   const responseCache = new Map()
@@ -1079,6 +1153,7 @@ export function createHandler(ctx, options = {}) {
     const sort = params.get('sort') === 'tokens' ? 'tokens' : 'active'
     const search = (params.get('q') ?? '').slice(0, 200)
     const readParam = (name) => (params.get(name) ?? '').slice(0, 512)
+    const sources = parseSources(params.get('sources'))
     const filters = {
       workspace: readParam('workspace'),
       provider: readParam('provider'),
@@ -1089,7 +1164,7 @@ export function createHandler(ctx, options = {}) {
       sendJson(res, 400, { ok: false, code: 'range', message: 'from/to must be finite and from < to' })
       return
     }
-    const cacheKey = [range, from, to, search, sort, filters.workspace, filters.provider, filters.model, filters.session].join('\u0000')
+    const cacheKey = [range, from, to, search, sort, filters.workspace, filters.provider, filters.model, filters.session, sources.join(',')].join('\u0000')
     const ttl = Math.max(0, Number(config.refreshSeconds) || 0) * 1000
     const cached = responseCache.get(cacheKey)
     if (!force && cached !== undefined && now() - cached.at < ttl) {
@@ -1100,10 +1175,25 @@ export function createHandler(ctx, options = {}) {
     try {
       const started = Date.now()
       if (scanning === null) scanning = scan().finally(() => { scanning = null })
-      const scanned = await scanning
+      const [scanned, externalSessions, externalCatalog] = await Promise.all([
+        scanning,
+        sourceStore.sessions(),
+        sourceStore.catalog(),
+      ])
+      const sourceCatalog = withBuiltinSource(externalCatalog, scanned.sessions.length)
+      const effectiveSources = sources.includes('all')
+        ? sourceCatalog.map((source) => source.id)
+        : sources
       let summary
       try {
-        summary = summarizeSessions(scanned.sessions, {
+        summary = summarizeSessions([
+          ...scanned.sessions.map((session) => ({
+            ...session,
+            source: BUILTIN_SOURCE_ID,
+            sourceLabel: BUILTIN_SOURCE_LABEL,
+          })),
+          ...externalSessions,
+        ], {
           range,
           from,
           to,
@@ -1113,6 +1203,7 @@ export function createHandler(ctx, options = {}) {
           requestsLimit: config.requestsLimit,
           filters,
           sort,
+          sources: effectiveSources,
         })
       } catch (error) {
         sendJson(res, 500, { ok: false, code: 'aggregate', message: error instanceof Error ? error.message : String(error) })
@@ -1138,9 +1229,11 @@ export function createHandler(ctx, options = {}) {
         range,
         active,
         ...summary,
+        sources: sourceCatalog,
         balance: balance.reading,
         scan: {
           sessions: scanned.sessions.length,
+          externalSessions: externalSessions.length,
           parsed: scanned.scanned,
           requests: summary.scanned.requests,
           errors: scanned.errors,
@@ -1161,6 +1254,78 @@ export function createHandler(ctx, options = {}) {
 }
 
 /**
+ * Build the local ingestion route used by other plugins, MCP bridges and
+ * helper scripts. DSH-hosted callers can use the `usageAudit` service instead.
+ * @param {object} ctx - plugin context.
+ * @param {{ config?: object, sourceStore?: object }} [options]
+ * @returns {(req: object, res: object) => Promise<void>}
+ */
+export function createIngestHandler(ctx, options = {}) {
+  const config = { ...DEFAULTS, ...(options.config ?? {}) }
+  const sourceStore = options.sourceStore ?? createSourceStore({ home: options.home })
+  return async (req, res) => {
+    if (!allow(ctx, req)) {
+      res.statusCode = 401
+      res.end()
+      return
+    }
+    if (req.method !== 'POST') {
+      res.statusCode = 405
+      res.setHeader('allow', 'POST')
+      res.end()
+      return
+    }
+    if (typeof config.ingestToken === 'string' && config.ingestToken !== '') {
+      const provided = req.headers?.['x-usage-token']
+      if (provided !== config.ingestToken) {
+        sendJson(res, 401, { ok: false, code: 'token', message: 'invalid x-usage-token' })
+        return
+      }
+    }
+    try {
+      const body = await readJsonBody(req)
+      const result = await sourceStore.ingest(body)
+      sendJson(res, 200, { ok: true, ...result })
+    } catch (error) {
+      sendJson(res, 400, {
+        ok: false,
+        code: error?.code ?? 'ingest',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+}
+
+/** Build the read-only source inventory route. */
+export function createSourcesHandler(ctx, options = {}) {
+  const sourceStore = options.sourceStore ?? createSourceStore({ home: options.home })
+  return async (req, res) => {
+    if (!allow(ctx, req)) {
+      res.statusCode = 401
+      res.end()
+      return
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.statusCode = 405
+      res.setHeader('allow', 'GET, HEAD')
+      res.end()
+      return
+    }
+    try {
+      const catalog = await sourceStore.catalog()
+      sendJson(res, 200, {
+        ok: true,
+        store: sourceStore.file,
+        builtin: { id: BUILTIN_SOURCE_ID, label: BUILTIN_SOURCE_LABEL },
+        sources: catalog,
+      })
+    } catch (error) {
+      sendJson(res, 500, { ok: false, code: 'sources', message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+}
+
+/**
  * Register the readout route.
  * @param {object} ctx - plugin context carrying `webServer`.
  * @param {object} config - optional overrides (`refreshSeconds`, `balanceSeconds`, `pricing`, `requestsLimit`).
@@ -1168,11 +1333,28 @@ export function createHandler(ctx, options = {}) {
 export function apply(ctx, config = {}) {
   const logger = ctx.logger ?? console
   try {
-    const handler = createHandler(ctx, { config })
+    const sourceStore = createSourceStore()
+    const handler = createHandler(ctx, { config, sourceStore })
+    const ingest = createIngestHandler(ctx, { config, sourceStore })
+    const sources = createSourcesHandler(ctx, { sourceStore })
     ctx.effect(
       () => ctx.webServer.register({ kind: 'exact', path: ROUTE, handler }),
       'dsh-usage-statistics: usage data route',
     )
+    ctx.effect(
+      () => ctx.webServer.register({ kind: 'exact', path: INGEST_ROUTE, handler: ingest }),
+      'dsh-usage-statistics: usage ingest route',
+    )
+    ctx.effect(
+      () => ctx.webServer.register({ kind: 'exact', path: SOURCES_ROUTE, handler: sources }),
+      'dsh-usage-statistics: usage sources route',
+    )
+    ctx.provide('usageAudit', {
+      version: PLUGIN_VERSION,
+      ingest: (payload) => sourceStore.ingest(payload),
+      sources: () => sourceStore.catalog(),
+      file: sourceStore.file,
+    })
     logger.info?.('dsh-usage-statistics ready at ' + ROUTE)
   } catch (error) {
     logger.warn?.('dsh-usage-statistics failed to apply: ' + (error instanceof Error ? error.message : String(error)))
