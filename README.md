@@ -90,6 +90,8 @@ dsh plugin --profile desktop add git+https://github.com/CHengShan-deep/dsh-usage
 
 重启 DSH 后，设置左侧会出现「用量统计」。
 
+> 从旧版 `dsh-usage-statistics` 升级：先移除 `local-plugins/dsh-usage-statistics` 和 `cordis.patch.yml` 里的旧 `usage-statistics` 条目，再安装本包，避免同一个插件 id 重复注册。
+
 ## 配置（可选）
 
 `apply(ctx, config)` 支持：
