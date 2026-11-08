@@ -70,12 +70,12 @@
       },
       "versions": [
         {
-          "version": "0.4.1",
-          "publishTimestamp": 1794132286,
+          "version": "0.4.2",
+          "publishTimestamp": 1794133512,
           "source": {
             "type": "git",
             "url": "https://github.com/CHengShan-deep/dsh-usage-compass",
-            "commit": "9ef2e44c7f10b55cfaf1c7959d1825143c0d6bc0"
+            "commit": "f9acbce5eec6543a656eed9ad2499cd7ea759ec6"
           },
           "engines": {
             "dsh": ">=0.2.1-rc.5"
