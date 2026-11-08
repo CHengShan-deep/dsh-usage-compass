@@ -1,0 +1,87 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Usage Compass Plugins",
+    "zh": "用量罗盘插件"
+  },
+  "description": {
+    "en": "Single-plugin market index for dsh-usage-compass.",
+    "zh": "dsh-usage-compass 的单插件市场索引。"
+  },
+  "metadata": {
+    "categories": {
+      "observability": {
+        "title": {
+          "en": "Observability",
+          "zh": "可观测"
+        }
+      }
+    },
+    "labels": {
+      "forecast": {
+        "title": {
+          "en": "Forecast",
+          "zh": "预测"
+        }
+      },
+      "balance": {
+        "title": {
+          "en": "Balance",
+          "zh": "余额"
+        }
+      }
+    },
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "dsh-usage-compass",
+      "title": {
+        "en": "Usage Compass",
+        "zh": "用量罗盘"
+      },
+      "description": {
+        "en": "DSH usage, balance and trend forecast dashboard for OpenCode Go and DeepSeek.",
+        "zh": "DSH 本机 API 用量、余额与趋势预测：支持 OpenCode Go 和 DeepSeek 官方。"
+      },
+      "icon": "https://raw.githubusercontent.com/CHengShan-deep/dsh-usage-compass/main/docs/icon.svg",
+      "author": "CHengShan-deep",
+      "homepage": "https://github.com/CHengShan-deep/dsh-usage-compass",
+      "repository": {
+        "url": "https://github.com/CHengShan-deep/dsh-usage-compass"
+      },
+      "metadata": {
+        "category": "observability",
+        "keywords": [
+          "dsh-plugin",
+          "usage",
+          "usage-statistics",
+          "forecast",
+          "balance",
+          "opencode-go",
+          "deepseek",
+          "用量统计",
+          "预测"
+        ],
+        "labels": [
+          "forecast",
+          "balance"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.3.0",
+          "publishTimestamp": 1794124751,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/CHengShan-deep/dsh-usage-compass",
+            "commit": "d0610636cdac6ff9d1151cf02f138b61dc52c5ad"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-rc.5"
+          }
+        }
+      ]
+    }
+  ]
+}
