@@ -1,0 +1,7 @@
+- insert:
+    - id: usage-statistics
+      name: dsh-usage-compass
+      config:
+        refreshSeconds: 5
+        balanceSeconds: 30
+        requestsLimit: 5000

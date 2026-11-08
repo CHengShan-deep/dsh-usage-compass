@@ -1,0 +1,58 @@
+{
+  "name": "dsh-usage-compass",
+  "version": "0.3.0",
+  "description": "用量罗盘：DSH 设置页的 API 用量、余额与趋势预测插件，支持 OpenCode Go 和 DeepSeek 官方。",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "install.ps1",
+    "docs/",
+    "market/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "usage-statistics",
+    "usage-forecast",
+    "balance",
+    "opencode-go",
+    "deepseek"
+  ],
+  "homepage": "https://github.com/CHengShan-deep/dsh-usage-compass",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CHengShan-deep/dsh-usage-compass.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CHengShan-deep/dsh-usage-compass/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}
